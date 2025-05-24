@@ -23,13 +23,13 @@ env:
   DIY_P1_SH: 360T7/diy1.sh
   DIY_P2_SH: 360T7/diy2.sh
   UPLOAD_FIRMWARE: false
-  UPLOAD_RELEASE: true
-  PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+  UPLOAD_RELEASE: false
+
   TZ: Asia/Shanghai
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-20.04
 
     steps:
     - name: 检查项目分支
@@ -100,96 +100,58 @@ jobs:
         make -j$(nproc) || make -j1 V=s || (curl -k -d "title=360T7固件编译失败" -d "content=编译固件版本：${{ env.FIRMWARE_VERSION }}%0A编译开始时间：${{ env.START_DATE }}%0A编译结束时间：$(date +'%Y年%m月%d日 %H点%M分')" -d "token=${{ env.PUSHPLUS_TOKEN }}&channel=cp&webhook=server" "http://www.pushplus.plus/send")
         echo "status=success" >> $GITHUB_OUTPUT
 
-     - name: Check space usage 检查磁盘空间
-      if: (!cancelled())
-      run: df -hT
-
-    - name: Upload bin directory 上传bin目录（视配置）
-      uses: actions/upload-artifact@main
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
-      with:
-        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }} # 上传文件名
-        path: openwrt/bin # 上传路径
-
-    - name: Organize files 整理固件文件
+    - name: 整理固件
       id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      if: steps.compile.outputs.status == 'success' && !cancelled()
       run: |
+        # 整理固件包时候,删除您不想要的固件或者文件,让它不需要上传到Actions空间
         cd openwrt/bin/targets/*/*
-        rm -rf packages # 删除packages目录
-        rm -rf feeds.buildinfo # 删除feeds构建信息
-        rm -rf sha256sums # 删除校验文件
-        rm -rf version.buildinfo # 删除版本信息
-        rm -rf profiles.json # 删除profiles文件
-        rm -rf *.manifest # 删除manifest文件
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV # 设置固件路径变量
-        echo "status=success" >> $GITHUB_OUTPUT # 输出状态
+        rm -rf version.buildinfo
+        rm -rf profiles.json
+        rm -rf *rootfs*
+        rm -rf *kernel*
+        rm -rf *.manifest
+        rm -rf feeds.buildinfo
+        rm -rf sha256sums
+        mv *sysupgrade.bin 360T7-${{ env.FIRMWARE_VERSION }}-sysupgrade.bin || echo 没有找到 *sysupgrade.bin 文件
+        mv *factory.bin 360T7-${{ env.FIRMWARE_VERSION }}-factory.bin || echo 没有找到 *factory.bin 文件
+        echo -e "$(sha256sum *)\n" > sha256sums
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: Upload firmware directory 上传固件
+    - name: 上传固件到Github Action空间
+      if: env.UPLOAD_FIRMWARE == 'true' 
       uses: actions/upload-artifact@main
-      if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }} # 上传文件名
-        path: ${{ env.FIRMWARE }} # 上传路径
+        name: 360T7-${{ env.FIRMWARE_VERSION }}
+        path: ${{ env.FIRMWARE }}
 
-    - name: Upload firmware to cowtransfer 上传到Cowtransfer（视配置）
-      id: cowtransfer
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_COWTRANSFER == 'true' && !cancelled()
-      run: |
-        curl -fsSL git.io/file-transfer | sh # 下载文件传输脚本
-        ./transfer cow --block 2621440 -s -p 64 --no-progress ${FIRMWARE} 2>&1 | tee cowtransfer.log # 上传文件
-        echo "::warning file=cowtransfer.com::$(cat cowtransfer.log | grep https)" # 输出链接
-        echo "url=$(cat cowtransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT # 保存链接
-
-    - name: Upload firmware to WeTransfer  上传到WeTransfer（视配置）
-      id: wetransfer
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_WETRANSFER == 'true' && !cancelled()
-      run: |
-        curl -fsSL git.io/file-transfer | sh # 下载文件传输脚本
-        ./transfer wet -s -p 16 --no-progress ${FIRMWARE} 2>&1 | tee wetransfer.log # 上传文件
-        echo "::warning file=wetransfer.com::$(cat wetransfer.log | grep https)" # 输出链接
-        echo "url=$(cat wetransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT # 保存链接
-
-    - name: Generate release tag 生成GitHub Release标签
+    - name: 生成发布标签
       id: tag
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT # 设置标签名
-        touch release.txt # 创建发布说明文件
-        [ $UPLOAD_COWTRANSFER = true ] && echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt # 添加Cowtransfer链接
-        [ $UPLOAD_WETRANSFER = true ] && echo "🔗 [WeTransfer](${{ steps.wetransfer.outputs.url }})" >> release.txt # 添加WeTransfer链接
-        echo "status=success" >> $GITHUB_OUTPUT # 输出状态
+        echo "::set-output name=release_tag::$(date +"%Y.%m.%d-%H.%M")"
+        touch release.txt
+        echo "
+        💻 架构: 	mediatek/mt7981
 
-    - name: Upload firmware to release 上传固件到GitHub Release
-      uses: softprops/action-gh-release@v2
+        📂 源码: ${{ env.REPO_URL }}
+
+        🌳 分支: openwrt-21.02
+
+        ⏱️ 编译时间: $(date +"%Y年%m月%d日%H时%M分")
+
+        🌐 管理地址: 192.168.5.1
+
+        👤 用户名: root
+
+        🔒 密码: password " >> release.txt
+        echo "::set-output name=status::success"
+
+    - name: 自动发布固件到 Releases
+      uses: softprops/action-gh-release@v1
       if: steps.tag.outputs.status == 'success' && !cancelled()
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # GitHub令牌
       with:
-        tag_name: ${{ steps.tag.outputs.release_tag }} # 标签名
-        body_path: release.txt # 发布说明文件
-        files: ${{ env.FIRMWARE }}/* # 上传固件文件
-
-    - name: Remove old artifacts 删除过期的Artifacts
-      uses: c-hive/gha-remove-artifacts@v1
-      with:
-        age: '15 days' # 保留15天的Artifacts
-        # skip-tags: true # 跳过带标签的（已注释）
-        # skip-recent: 5 # 保留最近5个（已注释）
-
-    - name: Delete workflow runs 删除旧的工作流记录
-      uses: Mattraks/delete-workflow-runs@main
-      with:
-        token: ${{ github.token }} # GitHub令牌
-        repository: ${{ github.repository }} # 仓库名称
-        retain_days: 1 # 保留1天的记录
-        keep_minimum_runs: 1 # 至少保留1次运行
-
-    - name: Remove old Releases 删除旧的GitHub Release
-      uses: dev-drprasad/delete-older-releases@v0.3.4
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      with:
-        keep_latest: 6 # 保留最新的6个Release
-        delete_tags: true # 删除对应的标签
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # GitHub令牌
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        body_path: release.txt
+        files: ${{ env.FIRMWARE }}/*
